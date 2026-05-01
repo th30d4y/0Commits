@@ -10,3 +10,7 @@ rust-lang/rust
 laravel/laravel
 sveltejs/svelte
 denoland/deno
+vercel/next.js
+nuxt/nuxt
+vitejs/vite
+tailwindlabs/tailwindcss
