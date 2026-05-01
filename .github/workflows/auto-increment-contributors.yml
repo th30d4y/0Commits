@@ -1,4 +1,4 @@
-name: Auto Increment Counter (Every 10 Seconds)
+name: Auto Increment Counter (Every 10 Seconds - Unique Users)
 
 on:
   workflow_dispatch:
@@ -17,41 +17,85 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Fetch real users from popular public repos
+      - name: Build used-users list from git history
+        id: used
+        run: |
+          # Extract all emails already used in commit history
+          USED_EMAILS=$(git log --format='%ae' | sort -u)
+          USED_LOGINS=$(git log --format='%an' | sort -u)
+
+          echo "Already used emails:"
+          echo "$USED_EMAILS"
+
+          # Save as JSON array for filtering
+          USED_JSON=$(echo "$USED_EMAILS" | jq -R . | jq -s .)
+          echo "used_emails=$USED_JSON" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch fresh unused contributors from public repos
         id: contributors
         run: |
-          echo "Fetching real GitHub users from popular repos..."
+          USED_EMAILS='${{ steps.used.outputs.used_emails }}'
 
-          # Pull contributors from multiple big public repos for variety
+          echo "Fetching fresh users from popular repos..."
+
+          # Fetch from multiple pages across multiple repos for max variety
           REPO_LIST=(
             "torvalds/linux"
             "microsoft/vscode"
             "facebook/react"
+            "golang/go"
+            "kubernetes/kubernetes"
+            "nodejs/node"
+            "django/django"
+            "rails/rails"
           )
 
           ALL_HUMANS="[]"
 
           for REPO in "${REPO_LIST[@]}"; do
-            echo "Fetching from $REPO..."
-            RESULT=$(curl -s \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/$REPO/contributors?per_page=20")
+            # Fetch 2 pages per repo (page 1 and 2) for variety
+            for PAGE in 1 2; do
+              RESULT=$(curl -s \
+                -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/$REPO/contributors?per_page=30&page=$PAGE")
 
-            # Filter only real humans
-            HUMANS=$(echo "$RESULT" | jq '[.[] | select(.type == "User") | select(.login | test("\\[bot\\]$") | not)]')
-
-            # Merge into master list
-            ALL_HUMANS=$(echo "$ALL_HUMANS $HUMANS" | jq -s 'add | unique_by(.login)')
+              HUMANS=$(echo "$RESULT" | jq '[.[] | select(.type == "User") | select(.login | test("\\[bot\\]$") | not)]')
+              ALL_HUMANS=$(echo "[$ALL_HUMANS, $HUMANS]" | jq 'add | unique_by(.login)')
+            done
           done
 
-          TOTAL=$(echo "$ALL_HUMANS" | jq length)
-          echo "Total unique human contributors: $TOTAL"
+          TOTAL_BEFORE=$(echo "$ALL_HUMANS" | jq length)
+          echo "Total humans fetched: $TOTAL_BEFORE"
 
-          echo "humans=$ALL_HUMANS" >> "$GITHUB_OUTPUT"
-          echo "total=$TOTAL"       >> "$GITHUB_OUTPUT"
+          # Filter out already-used users by checking their email against git history
+          # We store used logins in a file to track across iterations
+          if [ -f .used_logins.txt ]; then
+            USED_LOGINS=$(cat .used_logins.txt)
+          else
+            USED_LOGINS=""
+          fi
 
-      - name: Loop — commit every 10 seconds for ~4m30s
+          # Remove already used logins from the list
+          FRESH_HUMANS=$(echo "$ALL_HUMANS" | jq --arg used "$USED_LOGINS" '
+            ($used | split("\n")) as $usedList |
+            [.[] | select(.login as $l | $usedList | index($l) == null)]
+          ')
+
+          TOTAL_FRESH=$(echo "$FRESH_HUMANS" | jq length)
+          echo "Fresh unused humans: $TOTAL_FRESH"
+
+          if [ "$TOTAL_FRESH" -eq 0 ]; then
+            echo "All known users used! Resetting used list..."
+            rm -f .used_logins.txt
+            FRESH_HUMANS="$ALL_HUMANS"
+            TOTAL_FRESH=$(echo "$FRESH_HUMANS" | jq length)
+          fi
+
+          echo "humans=$FRESH_HUMANS" >> "$GITHUB_OUTPUT"
+          echo "total=$TOTAL_FRESH"   >> "$GITHUB_OUTPUT"
+
+      - name: Loop — commit every 10 seconds, each user only once
         run: |
           HUMANS='${{ steps.contributors.outputs.humans }}'
           TOTAL=${{ steps.contributors.outputs.total }}
@@ -60,11 +104,22 @@ jobs:
 
           git config pull.rebase false
 
+          # Load or create used logins tracker file
+          touch .used_logins.txt
+
           while [ $(date +%s) -lt $END_TIME ]; do
 
-            # Rotate through contributors
+            # Pick next unused user
             INDEX=$(( ITERATION % TOTAL ))
             LOGIN=$(echo "$HUMANS" | jq -r ".[$INDEX].login")
+
+            # Skip if already used in this run
+            if grep -qx "$LOGIN" .used_logins.txt 2>/dev/null; then
+              echo "[$ITERATION] Skipping $LOGIN — already used"
+              ITERATION=$(( ITERATION + 1 ))
+              sleep 2
+              continue
+            fi
 
             # Fetch their real GitHub profile
             PROFILE=$(curl -s \
@@ -78,7 +133,7 @@ jobs:
 
             echo "[$ITERATION] Committing as: $NAME <$EMAIL>"
 
-            # Pull latest to avoid conflicts
+            # Pull latest
             git pull origin main --no-edit 2>/dev/null || true
 
             # Increment counter
@@ -86,17 +141,20 @@ jobs:
             NEW=$(( CURRENT + 2 ))
             sed -i "s/Counter: ${CURRENT}/Counter: ${NEW}/" README.md
 
-            # Commit and push
+            # Mark this login as used BEFORE committing
+            echo "$LOGIN" >> .used_logins.txt
+
+            # Commit .used_logins.txt + README together
             git config user.name  "$NAME"
             git config user.email "$EMAIL"
-            git add README.md
+            git add README.md .used_logins.txt
             git commit -m "chore: increment counter to $NEW (by @$LOGIN)"
             git push origin main
 
-            echo "✅ $NAME → counter $CURRENT → $NEW"
+            echo "✅ $NAME → counter $CURRENT → $NEW (marked as used)"
 
             ITERATION=$(( ITERATION + 1 ))
             sleep 10
           done
 
-          echo "✅ Loop done — $ITERATION commits made."
+          echo "✅ Loop done — $ITERATION unique user commits made."
