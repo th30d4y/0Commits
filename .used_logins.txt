@@ -70,3 +70,4 @@ HerringtonDarkholme
 HusamElbashir
 JacksonTian
 JaeHyuckSa
+Jinjiang
