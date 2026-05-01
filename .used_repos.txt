@@ -6,3 +6,7 @@ nodejs/node
 django/django
 rails/rails
 vuejs/vue
+rust-lang/rust
+laravel/laravel
+sveltejs/svelte
+denoland/deno
