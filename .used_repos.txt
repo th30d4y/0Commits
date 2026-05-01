@@ -22,3 +22,7 @@ eslint/eslint
 webpack/webpack
 babel/babel
 jestjs/jest
+cypress-io/cypress
+puppeteer/puppeteer
+axios/axios
+reduxjs/redux
