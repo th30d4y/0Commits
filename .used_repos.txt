@@ -18,3 +18,7 @@ nestjs/nest
 expressjs/express
 socketio/socket.io
 prettier/prettier
+eslint/eslint
+webpack/webpack
+babel/babel
+jestjs/jest
