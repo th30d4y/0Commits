@@ -17,147 +17,128 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Ensure counter exists in README
+      - name: Setup
         run: |
-          # Auto-create README with counter if missing or counter line missing
+          # Make sure README has a counter line
           if [ ! -f README.md ]; then
-            echo "# My Repo" > README.md
-            echo "" >> README.md
-            echo "Counter: 0" >> README.md
-            echo "Created README.md with counter"
-          elif ! grep -q "Counter: " README.md; then
-            echo "" >> README.md
-            echo "Counter: 0" >> README.md
-            echo "Added Counter line to existing README.md"
-          else
-            echo "Counter found: $(grep -oP '(?<=Counter: )\d+' README.md)"
+            echo -e "# Repo\n\nCounter: 0" > README.md
           fi
+          if ! grep -q "Counter: " README.md; then
+            echo -e "\nCounter: 0" >> README.md
+          fi
+          echo "Counter is: $(grep 'Counter: ' README.md)"
 
-      - name: Fetch fresh unique users from popular repos
+          # Make sure used logins file exists
+          touch .used_logins.txt
+
+      - name: Fetch contributors and run loop
         run: |
-          echo "Fetching real human contributors..."
+          set +e  # Don't exit on error
 
-          if [ -f .used_logins.txt ]; then
-            USED_LOGINS=$(cat .used_logins.txt)
-          else
-            USED_LOGINS=""
-            touch .used_logins.txt
-          fi
+          # ── Fetch logins from popular repos ──────────────────────────────
+          LOGINS=()
 
-          REPO_LIST=(
+          REPOS=(
             "torvalds/linux"
             "microsoft/vscode"
             "facebook/react"
             "golang/go"
             "kubernetes/kubernetes"
-            "nodejs/node"
-            "django/django"
-            "rails/rails"
           )
 
-          ALL_HUMANS="[]"
-
-          for REPO in "${REPO_LIST[@]}"; do
-            for PAGE in 1 2 3; do
-              RESULT=$(curl -s \
+          for REPO in "${REPOS[@]}"; do
+            for PAGE in 1 2; do
+              RESPONSE=$(curl -sf \
                 -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
                 -H "Accept: application/vnd.github+json" \
-                "https://api.github.com/repos/$REPO/contributors?per_page=30&page=$PAGE")
+                "https://api.github.com/repos/$REPO/contributors?per_page=30&page=$PAGE" 2>/dev/null)
 
-              HUMANS=$(echo "$RESULT" | jq '[.[] | select(.type == "User") | select(.login | test("\\[bot\\]$") | not)] // []')
-              ALL_HUMANS=$(echo "[$ALL_HUMANS, $HUMANS]" | jq 'add | unique_by(.login)')
+              if [ -z "$RESPONSE" ]; then continue; fi
+
+              # Extract logins one per line safely
+              BATCH=$(echo "$RESPONSE" | jq -r '.[] | select(.type=="User") | select(.login | test("bot";"i") | not) | .login' 2>/dev/null)
+              while IFS= read -r login; do
+                [ -n "$login" ] && LOGINS+=("$login")
+              done <<< "$BATCH"
             done
           done
 
-          echo "Total humans fetched: $(echo "$ALL_HUMANS" | jq length)"
+          # Deduplicate
+          UNIQUE_LOGINS=($(printf '%s\n' "${LOGINS[@]}" | sort -u))
+          echo "Total unique humans: ${#UNIQUE_LOGINS[@]}"
 
           # Filter out already used logins
-          FRESH=$(echo "$ALL_HUMANS" | jq --arg used "$USED_LOGINS" '
-            ($used | split("\n") | map(select(. != ""))) as $usedList |
-            [.[] | select(.login as $l | ($usedList | index($l)) == null)]
-          ')
+          FRESH_LOGINS=()
+          for login in "${UNIQUE_LOGINS[@]}"; do
+            if ! grep -qx "$login" .used_logins.txt; then
+              FRESH_LOGINS+=("$login")
+            fi
+          done
 
-          TOTAL=$(echo "$FRESH" | jq length)
-          echo "Fresh unused humans: $TOTAL"
+          echo "Fresh unused: ${#FRESH_LOGINS[@]}"
 
-          # If all used, reset
-          if [ "$TOTAL" -eq 0 ]; then
-            echo "All users exhausted — resetting!"
+          # Reset if all used
+          if [ ${#FRESH_LOGINS[@]} -eq 0 ]; then
+            echo "All used — resetting!"
             > .used_logins.txt
-            FRESH="$ALL_HUMANS"
-            TOTAL=$(echo "$FRESH" | jq length)
+            FRESH_LOGINS=("${UNIQUE_LOGINS[@]}")
           fi
 
-          echo "$FRESH" > /tmp/contributors.json
-          echo "TOTAL=$TOTAL" >> $GITHUB_ENV
-
-      - name: Loop — commit every 10 seconds, each user only once
-        run: |
-          TOTAL=${{ env.TOTAL }}
+          # ── Loop every 10 seconds ─────────────────────────────────────────
+          TOTAL=${#FRESH_LOGINS[@]}
           ITERATION=0
           END_TIME=$(( $(date +%s) + 270 ))
 
           git config pull.rebase false
-          touch .used_logins.txt
 
-          while [ $(date +%s) -lt $END_TIME ]; do
+          while [ $(date +%s) -lt $END_TIME ] && [ $ITERATION -lt $TOTAL ]; do
 
-            INDEX=$(( ITERATION % TOTAL ))
-            LOGIN=$(jq -r ".[$INDEX].login" /tmp/contributors.json)
+            LOGIN="${FRESH_LOGINS[$ITERATION]}"
+            echo "[$ITERATION] Fetching profile for: $LOGIN"
 
-            # Skip if already used
-            if grep -qx "$LOGIN" .used_logins.txt 2>/dev/null; then
-              echo "Skipping $LOGIN — already used"
+            PROFILE=$(curl -sf \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/users/$LOGIN" 2>/dev/null)
+
+            if [ -z "$PROFILE" ]; then
+              echo "Could not fetch profile for $LOGIN, skipping"
               ITERATION=$(( ITERATION + 1 ))
-              sleep 2
               continue
             fi
 
-            # Fetch real profile
-            PROFILE=$(curl -s \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/users/$LOGIN")
+            NAME=$(echo "$PROFILE" | jq -r '.name // .login' 2>/dev/null)
+            EMAIL=$(echo "$PROFILE" | jq -r '.email // empty' 2>/dev/null)
 
-            NAME=$(echo "$PROFILE" | jq -r '.name // .login')
-            EMAIL=$(echo "$PROFILE" | jq -r --arg login "$LOGIN" \
-              'if (.email != null and .email != "") then .email else ($login + "@users.noreply.github.com") end')
+            [ -z "$NAME" ] && NAME="$LOGIN"
+            [ -z "$EMAIL" ] && EMAIL="${LOGIN}@users.noreply.github.com"
 
-            echo "[$ITERATION] Committing as: $NAME <$EMAIL>"
+            echo "Committing as: $NAME <$EMAIL>"
 
             # Pull latest
             git pull origin main --no-edit 2>/dev/null || true
 
-            # Read current counter safely
-            CURRENT=$(grep -oP '(?<=Counter: )\d+' README.md || echo "0")
+            # Read counter
+            CURRENT=$(grep -oP '(?<=Counter: )\d+' README.md 2>/dev/null || echo "0")
             NEW=$(( CURRENT + 2 ))
 
             # Update counter
             sed -i "s/Counter: ${CURRENT}/Counter: ${NEW}/" README.md
 
-            # Verify update worked
-            VERIFY=$(grep -oP '(?<=Counter: )\d+' README.md || echo "0")
-            if [ "$VERIFY" != "$NEW" ]; then
-              echo "Counter update failed, skipping commit"
-              ITERATION=$(( ITERATION + 1 ))
-              sleep 5
-              continue
-            fi
-
-            # Mark as used
+            # Mark login as used
             echo "$LOGIN" >> .used_logins.txt
 
-            # Commit
+            # Commit and push
             git config user.name  "$NAME"
             git config user.email "$EMAIL"
             git add README.md .used_logins.txt
-            git commit -m "chore: increment counter to $NEW (by @$LOGIN)"
-            git push origin main
+            git commit -m "chore: increment counter to $NEW (by @$LOGIN)" 2>/dev/null
+            git push origin main 2>/dev/null
 
-            echo "✅ $NAME → $CURRENT → $NEW"
+            echo "✅ $NAME → counter $CURRENT → $NEW"
 
             ITERATION=$(( ITERATION + 1 ))
             sleep 10
           done
 
-          echo "✅ Done — $ITERATION commits made."
+          echo "✅ Loop complete — $ITERATION commits made."
