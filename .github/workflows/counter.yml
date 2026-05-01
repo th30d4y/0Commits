@@ -1,6 +1,8 @@
 name: Auto Increment Counter
 
 on:
+  schedule:
+    - cron: '0 0 * * *'
   workflow_dispatch:
 
 permissions:
@@ -15,7 +17,7 @@ jobs:
 
       - name: Increment counter in README
         run: |
-          current=$(grep -oP '(?<=Counter: )\d+' README.md)
+          current=$(grep -oP '(?<=Counter: )\d+' README.md || echo 0)
           new=$((current + 2))
           sed -i "s/Counter: ${current}/Counter: ${new}/" README.md
           echo "Counter updated from ${current} to ${new}"
