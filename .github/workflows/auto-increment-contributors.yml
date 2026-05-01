@@ -1,0 +1,77 @@
+name: Auto Increment Counter (Rotating Contributors)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 9 * * *'   # Runs daily at 9 AM UTC — remove if manual-only
+
+permissions:
+  contents: write
+
+jobs:
+  increment:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # Full history needed for git log
+
+      # ------------------------------------------------------------------ #
+      #  Define your top contributors here.                                 #
+      #  Format:  "Display Name|email@example.com"                         #
+      #  The workflow rotates through them in order, one per run.           #
+      # ------------------------------------------------------------------ #
+      - name: Select contributor for this run
+        id: pick
+        run: |
+          CONTRIBUTORS=(
+            "Linus Torvalds|torvalds@linux-foundation.org"
+            "Greg Kroah-Hartman|gregkh@linuxfoundation.org"
+            "Ingo Molnar|mingo@redhat.com"
+            "Thomas Gleixner|tglx@linutronix.de"
+            "David S. Miller|davem@davemloft.net"
+          )
+
+          TOTAL=${#CONTRIBUTORS[@]}
+
+          # Use total commit count mod N to pick contributor — deterministic
+          # and advances by 1 each run without needing external state.
+          COMMIT_COUNT=$(git rev-list --count HEAD)
+          INDEX=$(( COMMIT_COUNT % TOTAL ))
+
+          IFS='|' read -r NAME EMAIL <<< "${CONTRIBUTORS[$INDEX]}"
+          echo "name=$NAME"   >> "$GITHUB_OUTPUT"
+          echo "email=$EMAIL" >> "$GITHUB_OUTPUT"
+          echo "index=$INDEX" >> "$GITHUB_OUTPUT"
+          echo "Contributor selected: $NAME <$EMAIL> (slot $INDEX of $TOTAL)"
+
+      - name: Increment counter in README
+        id: counter
+        run: |
+          CURRENT=$(grep -oP '(?<=Counter: )\d+' README.md)
+          NEW=$(( CURRENT + 2 ))
+          sed -i "s/Counter: ${CURRENT}/Counter: ${NEW}/" README.md
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "new=$NEW"         >> "$GITHUB_OUTPUT"
+          echo "Counter updated: $CURRENT → $NEW"
+
+      - name: Commit and push as selected contributor
+        run: |
+          git config user.name  "${{ steps.pick.outputs.name }}"
+          git config user.email "${{ steps.pick.outputs.email }}"
+          git add README.md
+          git commit -m "chore: increment counter to ${{ steps.counter.outputs.new }}
+
+          Automated update by ${{ steps.pick.outputs.name }}.
+          Previous value: ${{ steps.counter.outputs.current }}"
+          git push
+
+      - name: Summary
+        run: |
+          echo "### Counter Update" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Contributor | ${{ steps.pick.outputs.name }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Counter | ${{ steps.counter.outputs.current }} → ${{ steps.counter.outputs.new }} |" >> "$GITHUB_STEP_SUMMARY"
