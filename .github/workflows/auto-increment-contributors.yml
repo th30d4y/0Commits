@@ -1,9 +1,10 @@
-name: Auto Increment Counter (Auto-Fetch Contributors)
+name: Auto Increment Counter (Every 10 Seconds)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 9 * * *'
+    - cron: '*/5 * * * *'   # GitHub minimum — runs every 5 minutes
+                              # The job itself loops every 10s internally
 
 permissions:
   contents: write
@@ -17,77 +18,81 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Fetch top contributors from GitHub API
-        id: pick
+      - name: Fetch human contributors once
+        id: contributors
         run: |
-          echo "Fetching top contributors for ${{ github.repository }}..."
+          echo "Fetching contributors for ${{ github.repository }}..."
 
-          # Fetch top 10 contributors via GitHub API
-          CONTRIBUTORS=$(curl -s \
+          ALL=$(curl -s \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/contributors?per_page=10")
+            "https://api.github.com/repos/${{ github.repository }}/contributors?per_page=30")
 
-          TOTAL=$(echo "$CONTRIBUTORS" | jq length)
-          echo "Found $TOTAL contributors"
+          # Filter real humans only (no bots)
+          HUMANS=$(echo "$ALL" | jq -c '[.[] | select(.type == "User") | select(.login | test("\\[bot\\]$") | not)]')
+
+          TOTAL=$(echo "$HUMANS" | jq length)
+          echo "Human contributors found: $TOTAL"
 
           if [ "$TOTAL" -eq 0 ]; then
-            echo "No contributors found, using repo owner as fallback"
-            LOGIN="${{ github.repository_owner }}"
-          else
-            # Rotate using run number
-            INDEX=$(( ${{ github.run_number }} % TOTAL ))
-            LOGIN=$(echo "$CONTRIBUTORS" | jq -r ".[$INDEX].login")
-            echo "Selected contributor slot $INDEX: $LOGIN"
+            # Fallback: repo owner
+            OWNER_PROFILE=$(curl -s \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/users/${{ github.repository_owner }}")
+            HUMANS=$(echo "[{\"login\":\"${{ github.repository_owner }}\",\"type\":\"User\"}]")
+            TOTAL=1
           fi
 
-          # Fetch the selected user's public profile
-          PROFILE=$(curl -s \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/users/$LOGIN")
+          echo "humans=$HUMANS"   >> "$GITHUB_OUTPUT"
+          echo "total=$TOTAL"     >> "$GITHUB_OUTPUT"
 
-          # Use display name if available, else fall back to login
-          NAME=$(echo "$PROFILE" | jq -r '.name // .login')
-
-          # Use public email if available, else use GitHub no-reply address
-          EMAIL=$(echo "$PROFILE" | jq -r \
-            --arg login "$LOGIN" \
-            '.email // ($login + "@users.noreply.github.com")')
-
-          echo "Committing as: $NAME <$EMAIL>"
-          echo "name=$NAME"   >> "$GITHUB_OUTPUT"
-          echo "email=$EMAIL" >> "$GITHUB_OUTPUT"
-          echo "login=$LOGIN" >> "$GITHUB_OUTPUT"
-
-      - name: Increment counter in README
-        id: counter
+      - name: Loop — commit every 10 seconds for ~5 minutes
         run: |
-          CURRENT=$(grep -oP '(?<=Counter: )\d+' README.md)
-          NEW=$(( CURRENT + 2 ))
-          sed -i "s/Counter: ${CURRENT}/Counter: ${NEW}/" README.md
-          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
-          echo "new=$NEW"         >> "$GITHUB_OUTPUT"
-          echo "Counter updated: $CURRENT → $NEW"
+          HUMANS='${{ steps.contributors.outputs.humans }}'
+          TOTAL=${{ steps.contributors.outputs.total }}
+          ITERATION=0
+          END_TIME=$(( $(date +%s) + 270 ))   # run for 4m30s to stay within 5m job window
 
-      - name: Commit and push as fetched contributor
-        run: |
-          git config user.name  "${{ steps.pick.outputs.name }}"
-          git config user.email "${{ steps.pick.outputs.email }}"
-          git add README.md
-          git commit -m "chore: increment counter to ${{ steps.counter.outputs.new }}
+          git config pull.rebase false
 
-          Auto-commit by @${{ steps.pick.outputs.login }}
-          Previous value: ${{ steps.counter.outputs.current }}"
-          git push
+          while [ $(date +%s) -lt $END_TIME ]; do
 
-      - name: Summary
-        run: |
-          echo "### Counter Update" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| GitHub User | @${{ steps.pick.outputs.login }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Display Name | ${{ steps.pick.outputs.name }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Email | ${{ steps.pick.outputs.email }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Counter | ${{ steps.counter.outputs.current }} → ${{ steps.counter.outputs.new }} |" >> "$GITHUB_STEP_SUMMARY"
+            # Pick contributor by iteration (rotates through all humans)
+            INDEX=$(( ITERATION % TOTAL ))
+            LOGIN=$(echo "$HUMANS" | jq -r ".[$INDEX].login")
+
+            # Fetch fresh profile each time
+            PROFILE=$(curl -s \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/users/$LOGIN")
+
+            NAME=$(echo "$PROFILE"  | jq -r '.name // .login')
+            EMAIL=$(echo "$PROFILE" | jq -r --arg login "$LOGIN" \
+              'if .email and .email != "" and .email != "null" then .email else ($login + "@users.noreply.github.com") end')
+
+            echo "[$ITERATION] Committing as: $NAME <$EMAIL>"
+
+            # Pull latest to avoid conflicts
+            git pull origin main --no-edit 2>/dev/null || true
+
+            # Read and increment counter
+            CURRENT=$(grep -oP '(?<=Counter: )\d+' README.md)
+            NEW=$(( CURRENT + 2 ))
+            sed -i "s/Counter: ${CURRENT}/Counter: ${NEW}/" README.md
+
+            # Commit and push
+            git config user.name  "$NAME"
+            git config user.email "$EMAIL"
+            git add README.md
+            git commit -m "chore: increment counter to $NEW (by @$LOGIN)"
+            git push origin main
+
+            echo "✅ Done — counter $CURRENT → $NEW"
+
+            ITERATION=$(( ITERATION + 1 ))
+            sleep 10
+          done
+
+          echo "Loop finished after $ITERATION commits."
