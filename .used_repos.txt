@@ -14,3 +14,7 @@ vercel/next.js
 nuxt/nuxt
 vitejs/vite
 tailwindlabs/tailwindcss
+nestjs/nest
+expressjs/express
+socketio/socket.io
+prettier/prettier
