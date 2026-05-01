@@ -1,0 +1,241 @@
+name: Auto Increment Counter (Auto Repo Switch)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  increment:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup
+        run: |
+          # Make sure README has a counter line
+          if [ ! -f README.md ]; then
+            echo -e "# Repo\n\nCounter: 0" > README.md
+          fi
+          if ! grep -q "Counter: " README.md; then
+            echo -e "\nCounter: 0" >> README.md
+          fi
+          echo "Counter is: $(grep 'Counter: ' README.md)"
+
+          # Make sure tracking files exist
+          touch .used_logins.txt
+          touch .used_repos.txt
+
+      - name: Fetch contributors and run loop
+        run: |
+          set +e
+
+          # ── Master repo pool (auto picks new ones when exhausted) ─────────
+          ALL_REPOS=(
+            "torvalds/linux"
+            "microsoft/vscode"
+            "facebook/react"
+            "golang/go"
+            "kubernetes/kubernetes"
+            "nodejs/node"
+            "django/django"
+            "rails/rails"
+            "vuejs/vue"
+            "rust-lang/rust"
+            "laravel/laravel"
+            "sveltejs/svelte"
+            "denoland/deno"
+            "vercel/next.js"
+            "nuxt/nuxt"
+            "vitejs/vite"
+            "tailwindlabs/tailwindcss"
+            "nestjs/nest"
+            "expressjs/express"
+            "socketio/socket.io"
+            "prettier/prettier"
+            "eslint/eslint"
+            "webpack/webpack"
+            "babel/babel"
+            "jestjs/jest"
+            "cypress-io/cypress"
+            "puppeteer/puppeteer"
+            "axios/axios"
+            "reduxjs/redux"
+            "mobxjs/mobx"
+            "graphql/graphql-js"
+            "apollographql/apollo-client"
+            "prisma/prisma"
+            "sequelize/sequelize"
+            "typeorm/typeorm"
+            "mongoosejs/mongoose"
+            "redis/redis"
+            "elastic/elasticsearch"
+            "apache/kafka"
+            "apache/spark"
+            "tensorflow/tensorflow"
+            "pytorch/pytorch"
+            "scikit-learn/scikit-learn"
+            "pandas-dev/pandas"
+            "numpy/numpy"
+            "matplotlib/matplotlib"
+            "jupyter/notebook"
+            "ansible/ansible"
+            "hashicorp/terraform"
+            "docker/compose"
+          )
+
+          TOTAL_REPOS=${#ALL_REPOS[@]}
+
+          # Load used repos
+          USED_REPOS=()
+          if [ -f .used_repos.txt ]; then
+            while IFS= read -r r; do
+              [ -n "$r" ] && USED_REPOS+=("$r")
+            done < .used_repos.txt
+          fi
+
+          # ── Pick active repos (unused ones first) ─────────────────────────
+          FRESH_REPOS=()
+          for repo in "${ALL_REPOS[@]}"; do
+            if ! grep -qx "$repo" .used_repos.txt 2>/dev/null; then
+              FRESH_REPOS+=("$repo")
+            fi
+          done
+
+          echo "Fresh repos available: ${#FRESH_REPOS[@]} / $TOTAL_REPOS"
+
+          # If all repos exhausted → reset repo list
+          if [ ${#FRESH_REPOS[@]} -eq 0 ]; then
+            echo "All repos exhausted — resetting repo list!"
+            > .used_repos.txt
+            > .used_logins.txt
+            FRESH_REPOS=("${ALL_REPOS[@]}")
+          fi
+
+          # Pick next 5 repos to use this run
+          ACTIVE_REPOS=("${FRESH_REPOS[@]:0:5}")
+          echo "Using repos this run:"
+          printf '  %s\n' "${ACTIVE_REPOS[@]}"
+
+          # ── Fetch logins from active repos ────────────────────────────────
+          LOGINS=()
+
+          for REPO in "${ACTIVE_REPOS[@]}"; do
+            echo "Fetching from $REPO..."
+            REPO_HAS_USERS=false
+
+            for PAGE in 1 2 3; do
+              RESPONSE=$(curl -sf \
+                -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/$REPO/contributors?per_page=30&page=$PAGE" 2>/dev/null)
+
+              if [ -z "$RESPONSE" ]; then continue; fi
+
+              BATCH=$(echo "$RESPONSE" | jq -r \
+                '.[] | select(.type=="User") | select(.login | test("bot";"i") | not) | .login' \
+                2>/dev/null)
+
+              COUNT=0
+              while IFS= read -r login; do
+                if [ -n "$login" ]; then
+                  LOGINS+=("$login")
+                  COUNT=$(( COUNT + 1 ))
+                  REPO_HAS_USERS=true
+                fi
+              done <<< "$BATCH"
+
+              echo "  Page $PAGE → $COUNT users"
+            done
+
+            # Mark repo as used after fetching
+            if $REPO_HAS_USERS; then
+              echo "$REPO" >> .used_repos.txt
+            fi
+          done
+
+          # Deduplicate logins
+          UNIQUE_LOGINS=($(printf '%s\n' "${LOGINS[@]}" | sort -u))
+          echo "Total unique humans fetched: ${#UNIQUE_LOGINS[@]}"
+
+          # Filter out already used logins
+          FRESH_LOGINS=()
+          for login in "${UNIQUE_LOGINS[@]}"; do
+            if ! grep -qx "$login" .used_logins.txt 2>/dev/null; then
+              FRESH_LOGINS+=("$login")
+            fi
+          done
+
+          echo "Fresh unused logins: ${#FRESH_LOGINS[@]}"
+
+          # If all logins used → reset login list only
+          if [ ${#FRESH_LOGINS[@]} -eq 0 ]; then
+            echo "All logins used — resetting login list!"
+            > .used_logins.txt
+            FRESH_LOGINS=("${UNIQUE_LOGINS[@]}")
+          fi
+
+          # ── Loop every 10 seconds ─────────────────────────────────────────
+          TOTAL=${#FRESH_LOGINS[@]}
+          ITERATION=0
+          END_TIME=$(( $(date +%s) + 270 ))
+
+          git config pull.rebase false
+
+          while [ $(date +%s) -lt $END_TIME ] && [ $ITERATION -lt $TOTAL ]; do
+
+            LOGIN="${FRESH_LOGINS[$ITERATION]}"
+            echo "[$ITERATION] Fetching profile: $LOGIN"
+
+            PROFILE=$(curl -sf \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/users/$LOGIN" 2>/dev/null)
+
+            if [ -z "$PROFILE" ]; then
+              echo "Could not fetch $LOGIN — skipping"
+              ITERATION=$(( ITERATION + 1 ))
+              continue
+            fi
+
+            NAME=$(echo "$PROFILE"  | jq -r '.name // .login' 2>/dev/null)
+            EMAIL=$(echo "$PROFILE" | jq -r '.email // empty'  2>/dev/null)
+
+            [ -z "$NAME" ]  && NAME="$LOGIN"
+            [ -z "$EMAIL" ] && EMAIL="${LOGIN}@users.noreply.github.com"
+
+            echo "Committing as: $NAME <$EMAIL>"
+
+            # Pull latest
+            git pull origin main --no-edit 2>/dev/null || true
+
+            # Read and increment counter
+            CURRENT=$(grep -oP '(?<=Counter: )\d+' README.md 2>/dev/null || echo "0")
+            NEW=$(( CURRENT + 2 ))
+            sed -i "s/Counter: ${CURRENT}/Counter: ${NEW}/" README.md
+
+            # Mark login as used
+            echo "$LOGIN" >> .used_logins.txt
+
+            # Commit and push
+            git config user.name  "$NAME"
+            git config user.email "$EMAIL"
+            git add README.md .used_logins.txt .used_repos.txt
+            git commit -m "chore: increment counter to $NEW (by @$LOGIN)" 2>/dev/null
+            git push origin main 2>/dev/null
+
+            echo "✅ $NAME → counter $CURRENT → $NEW"
+
+            ITERATION=$(( ITERATION + 1 ))
+            sleep 10
+          done
+
+          echo "✅ Loop complete — $ITERATION commits made this run."
+          echo "Repos used so far: $(wc -l < .used_repos.txt) / $TOTAL_REPOS"
+          echo "Logins used so far: $(wc -l < .used_logins.txt)"
