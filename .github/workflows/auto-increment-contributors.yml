@@ -17,11 +17,26 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Ensure counter exists in README
+        run: |
+          # Auto-create README with counter if missing or counter line missing
+          if [ ! -f README.md ]; then
+            echo "# My Repo" > README.md
+            echo "" >> README.md
+            echo "Counter: 0" >> README.md
+            echo "Created README.md with counter"
+          elif ! grep -q "Counter: " README.md; then
+            echo "" >> README.md
+            echo "Counter: 0" >> README.md
+            echo "Added Counter line to existing README.md"
+          else
+            echo "Counter found: $(grep -oP '(?<=Counter: )\d+' README.md)"
+          fi
+
       - name: Fetch fresh unique users from popular repos
         run: |
           echo "Fetching real human contributors..."
 
-          # Load already used logins from repo
           if [ -f .used_logins.txt ]; then
             USED_LOGINS=$(cat .used_logins.txt)
           else
@@ -67,13 +82,12 @@ jobs:
 
           # If all used, reset
           if [ "$TOTAL" -eq 0 ]; then
-            echo "All users exhausted — resetting used list!"
+            echo "All users exhausted — resetting!"
             > .used_logins.txt
             FRESH="$ALL_HUMANS"
             TOTAL=$(echo "$FRESH" | jq length)
           fi
 
-          # Save to file instead of output variable (avoids size limit)
           echo "$FRESH" > /tmp/contributors.json
           echo "TOTAL=$TOTAL" >> $GITHUB_ENV
 
@@ -114,10 +128,21 @@ jobs:
             # Pull latest
             git pull origin main --no-edit 2>/dev/null || true
 
-            # Increment counter
-            CURRENT=$(grep -oP '(?<=Counter: )\d+' README.md)
+            # Read current counter safely
+            CURRENT=$(grep -oP '(?<=Counter: )\d+' README.md || echo "0")
             NEW=$(( CURRENT + 2 ))
+
+            # Update counter
             sed -i "s/Counter: ${CURRENT}/Counter: ${NEW}/" README.md
+
+            # Verify update worked
+            VERIFY=$(grep -oP '(?<=Counter: )\d+' README.md || echo "0")
+            if [ "$VERIFY" != "$NEW" ]; then
+              echo "Counter update failed, skipping commit"
+              ITERATION=$(( ITERATION + 1 ))
+              sleep 5
+              continue
+            fi
 
             # Mark as used
             echo "$LOGIN" >> .used_logins.txt
