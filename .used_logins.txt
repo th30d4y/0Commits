@@ -36,3 +36,4 @@ Krzysztof-Cieslak
 MikeSpreitzer
 RReverser
 Simek
+SoloJiang
