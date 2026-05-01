@@ -1,9 +1,9 @@
-name: Auto Increment Counter (Rotating Contributors)
+name: Auto Increment Counter (Auto-Fetch Contributors)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 9 * * *'   # Runs daily at 9 AM UTC — remove if manual-only
+    - cron: '0 9 * * *'
 
 permissions:
   contents: write
@@ -15,36 +15,50 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # Full history needed for git log
+          fetch-depth: 0
 
-      # ------------------------------------------------------------------ #
-      #  Define your top contributors here.                                 #
-      #  Format:  "Display Name|email@example.com"                         #
-      #  The workflow rotates through them in order, one per run.           #
-      # ------------------------------------------------------------------ #
-      - name: Select contributor for this run
+      - name: Fetch top contributors from GitHub API
         id: pick
         run: |
-          CONTRIBUTORS=(
-            "Linus Torvalds|torvalds@linux-foundation.org"
-            "Greg Kroah-Hartman|gregkh@linuxfoundation.org"
-            "Ingo Molnar|mingo@redhat.com"
-            "Thomas Gleixner|tglx@linutronix.de"
-            "David S. Miller|davem@davemloft.net"
-          )
+          echo "Fetching top contributors for ${{ github.repository }}..."
 
-          TOTAL=${#CONTRIBUTORS[@]}
+          # Fetch top 10 contributors via GitHub API
+          CONTRIBUTORS=$(curl -s \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/contributors?per_page=10")
 
-          # Use total commit count mod N to pick contributor — deterministic
-          # and advances by 1 each run without needing external state.
-          COMMIT_COUNT=$(git rev-list --count HEAD)
-          INDEX=$(( COMMIT_COUNT % TOTAL ))
+          TOTAL=$(echo "$CONTRIBUTORS" | jq length)
+          echo "Found $TOTAL contributors"
 
-          IFS='|' read -r NAME EMAIL <<< "${CONTRIBUTORS[$INDEX]}"
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "No contributors found, using repo owner as fallback"
+            LOGIN="${{ github.repository_owner }}"
+          else
+            # Rotate using run number
+            INDEX=$(( ${{ github.run_number }} % TOTAL ))
+            LOGIN=$(echo "$CONTRIBUTORS" | jq -r ".[$INDEX].login")
+            echo "Selected contributor slot $INDEX: $LOGIN"
+          fi
+
+          # Fetch the selected user's public profile
+          PROFILE=$(curl -s \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/users/$LOGIN")
+
+          # Use display name if available, else fall back to login
+          NAME=$(echo "$PROFILE" | jq -r '.name // .login')
+
+          # Use public email if available, else use GitHub no-reply address
+          EMAIL=$(echo "$PROFILE" | jq -r \
+            --arg login "$LOGIN" \
+            '.email // ($login + "@users.noreply.github.com")')
+
+          echo "Committing as: $NAME <$EMAIL>"
           echo "name=$NAME"   >> "$GITHUB_OUTPUT"
           echo "email=$EMAIL" >> "$GITHUB_OUTPUT"
-          echo "index=$INDEX" >> "$GITHUB_OUTPUT"
-          echo "Contributor selected: $NAME <$EMAIL> (slot $INDEX of $TOTAL)"
+          echo "login=$LOGIN" >> "$GITHUB_OUTPUT"
 
       - name: Increment counter in README
         id: counter
@@ -56,14 +70,14 @@ jobs:
           echo "new=$NEW"         >> "$GITHUB_OUTPUT"
           echo "Counter updated: $CURRENT → $NEW"
 
-      - name: Commit and push as selected contributor
+      - name: Commit and push as fetched contributor
         run: |
           git config user.name  "${{ steps.pick.outputs.name }}"
           git config user.email "${{ steps.pick.outputs.email }}"
           git add README.md
           git commit -m "chore: increment counter to ${{ steps.counter.outputs.new }}
 
-          Automated update by ${{ steps.pick.outputs.name }}.
+          Auto-commit by @${{ steps.pick.outputs.login }}
           Previous value: ${{ steps.counter.outputs.current }}"
           git push
 
@@ -73,5 +87,7 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
           echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Contributor | ${{ steps.pick.outputs.name }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| GitHub User | @${{ steps.pick.outputs.login }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Display Name | ${{ steps.pick.outputs.name }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Email | ${{ steps.pick.outputs.email }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Counter | ${{ steps.counter.outputs.current }} → ${{ steps.counter.outputs.new }} |" >> "$GITHUB_STEP_SUMMARY"
