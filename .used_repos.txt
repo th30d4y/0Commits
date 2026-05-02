@@ -45,3 +45,4 @@ matplotlib/matplotlib
 jupyter/notebook
 ansible/ansible
 hashicorp/terraform
+docker/compose
