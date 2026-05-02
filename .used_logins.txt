@@ -328,3 +328,4 @@ GaelVaroquaux
 HoardingInfo
 JasonWeill
 Jmainguy
+JocelynDelalande
