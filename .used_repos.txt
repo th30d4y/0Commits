@@ -30,3 +30,6 @@ mobxjs/mobx
 graphql/graphql-js
 apollographql/apollo-client
 prisma/prisma
+sequelize/sequelize
+typeorm/typeorm
+redis/redis
