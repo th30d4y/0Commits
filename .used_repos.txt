@@ -39,3 +39,6 @@ apache/spark
 tensorflow/tensorflow
 pytorch/pytorch
 scikit-learn/scikit-learn
+pandas-dev/pandas
+numpy/numpy
+matplotlib/matplotlib
