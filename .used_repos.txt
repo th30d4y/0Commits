@@ -42,3 +42,6 @@ scikit-learn/scikit-learn
 pandas-dev/pandas
 numpy/numpy
 matplotlib/matplotlib
+jupyter/notebook
+ansible/ansible
+hashicorp/terraform
