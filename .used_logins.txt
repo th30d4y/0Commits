@@ -325,3 +325,4 @@ Fale
 Fred-sun
 GGabriele
 GaelVaroquaux
+HoardingInfo
