@@ -36,3 +36,6 @@ redis/redis
 elastic/elasticsearch
 apache/kafka
 apache/spark
+tensorflow/tensorflow
+pytorch/pytorch
+scikit-learn/scikit-learn
