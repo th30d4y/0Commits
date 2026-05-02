@@ -33,3 +33,6 @@ prisma/prisma
 sequelize/sequelize
 typeorm/typeorm
 redis/redis
+elastic/elasticsearch
+apache/kafka
+apache/spark
