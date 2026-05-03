@@ -239,3 +239,18 @@ jobs:
           echo "✅ Loop complete — $ITERATION commits made this run."
           echo "Repos used so far: $(wc -l < .used_repos.txt) / $TOTAL_REPOS"
           echo "Logins used so far: $(wc -l < .used_logins.txt)"
+
+          # ── Fallback: if no commits were made, increment directly ─────────
+          if [ $ITERATION -eq 0 ]; then
+            echo "No logins fetched — performing fallback increment..."
+            git pull origin main --no-edit 2>/dev/null || true
+            CURRENT=$(grep -oP '(?<=Counter: )\d+' README.md 2>/dev/null || echo "0")
+            NEW=$(( CURRENT + 2 ))
+            sed -i "s/Counter: ${CURRENT}/Counter: ${NEW}/" README.md
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add README.md
+            git commit -m "chore: increment counter to $NEW" 2>/dev/null
+            git push origin main 2>/dev/null
+            echo "✅ Fallback → counter $CURRENT → $NEW"
+          fi
